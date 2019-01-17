@@ -1,0 +1,22 @@
+version: "2"
+
+services:
+  udpf:
+    build: .
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    privileged: true
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - TARGET=target_one
+
+  target_one:
+    image: corfr/tcpdump
+    command: -XX -eni eth0 udp port 8125
+
+  target_two:
+    image: corfr/tcpdump
+    command: -XX -eni eth0 udp port 8125

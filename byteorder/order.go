@@ -7,7 +7,12 @@ import (
 
 // HtonIP transforms an net.IP to network-byte-order-byte-array
 func HtonIP(ip net.IP) [4]byte {
-	in := binary.BigEndian.Uint32(ip[12:16])
+	var in uint32
+	if len(ip) == 16 {
+		in = binary.BigEndian.Uint32(ip[12:16])
+	} else {
+		in = binary.BigEndian.Uint32(ip)
+	}
 	bytes := [4]byte{0, 0, 0, 0}
 	binary.BigEndian.PutUint32(bytes[:], in)
 	return bytes

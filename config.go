@@ -134,8 +134,12 @@ func (u *Upstream) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	} else {
 		return fmt.Errorf("invalid tc_action value: %s", cfg.TCAction)
 	}
+	addr, err := net.ResolveIPAddr("ip", cfg.Address)
+	if err != nil {
+		return fmt.Errorf("could not resolve addr %s: %s", cfg.Address, err)
+	}
 	newUpstream := Upstream{
-		Address:  byteorder.HtonIP(net.ParseIP(cfg.Address)),
+		Address:  byteorder.HtonIP(addr.IP),
 		Port:     byteorder.Htons(cfg.Port),
 		Count:    0,
 		TCAction: tcAction,

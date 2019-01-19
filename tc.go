@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"syscall"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/vishvananda/netlink"
 )
@@ -25,7 +26,7 @@ func createQdisc(link netlink.Link) error {
 	if err := netlink.QdiscAdd(qdisc); err != nil {
 		return fmt.Errorf("netlink: replacing qdisc for %s failed: %s", link.Attrs().Name, err)
 	}
-	log.Printf("netlink: replacing qdisc for %s succeeded\n", link.Attrs().Name)
+	log.Infof("netlink: replacing qdisc for %s succeeded\n", link.Attrs().Name)
 	return nil
 }
 
@@ -59,7 +60,7 @@ func createFilter(fd int, name string, link netlink.Link, parent uint32) error {
 	if err != nil {
 		return fmt.Errorf("failed to add filter: %s", err)
 	}
-	log.Printf("successfully added filter for %s \n", name)
+	log.Infof("netlink: successfully added filter for %s \n", name)
 	return nil
 }
 

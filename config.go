@@ -5,76 +5,61 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"unsafe"
 
 	bpf "github.com/iovisor/gobpf/bcc"
+	log "github.com/sirupsen/logrus"
 
 	"gopkg.in/yaml.v2"
 )
 
-// LBKey must match C struct lb_key
-type LBKey struct {
-	Address uint32
-	Port    uint16
+// Key must match C struct lb_key
+type Key struct {
+	Address [4]byte
+	Port    [2]byte
 	Slave   uint8
 }
 
-// LBUpstream must match C struct lb_upstream
-type LBUpstream struct {
-	Address uint32
-	Port    uint16
-	Count   uint8
+// Upstream must match C struct lb_upstream
+type Upstream struct {
+	Address  [4]byte
+	Port     [2]byte
+	Count    uint8
+	TCAction uint8
 }
 
-type ConfigKey struct {
-	Address string
-	Port    int
-}
-type ConfigUpstream struct {
-	// Address of upstream server
-	Address string `yaml:"address"`
-	// Port of upstream server
-	Port int `yaml:"port"`
+type config []struct {
+	Key      Key
+	Upstream []Upstream
 }
 
-type ConfigRecord struct {
-	Key      ConfigKey
-	Upstream []ConfigUpstream
-}
-
-type Config []ConfigRecord
-
-func NewConfigYaml(r io.Reader) (cfg *Config, err error) {
+func newConfigYaml(r io.Reader) (cfg *config, err error) {
 	d := yaml.NewDecoder(r)
 	err = d.Decode(&cfg)
 	return
 }
 
-func (c Config) Apply(tbl *bpf.Table) error {
+func (c config) Apply(tbl *bpf.Table) error {
 	for _, record := range c {
-		// prepare master record
-		k := record.Key.LBKey()
-		k.Slave = 0
-		v := &LBUpstream{Count: uint8(len(record.Upstream))}
-		err := tbl.SetP(unsafe.Pointer(k), unsafe.Pointer(v))
+		k := record.Key
+		k.Slave = 0 // the master
+		masterUpstream := Upstream{Count: uint8(len(record.Upstream))}
+		err := tbl.SetP(unsafe.Pointer(&k), unsafe.Pointer(&masterUpstream))
 		if err != nil {
 			return err
 		}
-		log.Printf("master: %#v | %#v\n", k, v)
 		for n, upstream := range record.Upstream {
-			v := upstream.LBUpstream()
 			k.Slave = uint8(n + 1)
-			err := tbl.SetP(unsafe.Pointer(k), unsafe.Pointer(v))
+			err := tbl.SetP(unsafe.Pointer(&k), unsafe.Pointer(&upstream))
 			if err != nil {
 				return err
 			}
 		}
 	}
 	for it := tbl.Iter(); it.Next(); {
-		var upstream LBUpstream
-		var key LBKey
+		var upstream Upstream
+		var key Key
 		err := binary.Read(bytes.NewBuffer(it.Key()), binary.LittleEndian, &key)
 		if err != nil {
 			return err
@@ -83,67 +68,73 @@ func (c Config) Apply(tbl *bpf.Table) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("---\nKEY: %#v\nVAL: %#v\n", key, upstream)
+		log.Infof("%s | %s", key.String(), upstream.String())
 	}
 	return nil
 }
 
-func (k ConfigKey) LBKey() *LBKey {
-	return NewLBKey(k.Address, k.Port)
-}
-
-func (k ConfigKey) String() string {
-	return fmt.Sprintf("%s:%d/%d", k.Address, k.Port)
-}
-
-func (u ConfigUpstream) LBUpstream() *LBUpstream {
-	return NewLBUpstream(u.Address, u.Port)
-}
-
-func (u ConfigUpstream) IP() net.IP {
-	return net.ParseIP(u.Address)
-}
-
-func (u ConfigUpstream) String() string {
-	return fmt.Sprintf("%s:%d", u.Address, u.Port)
-}
-
-func NewLBKey(addr string, port int) *LBKey {
-	return &LBKey{
-		Address: ip2int(net.ParseIP(addr)),
-		Port:    uint16be(uint16(port)),
+// UnmarshalYAML translates the yaml types to match the internal C types
+func (k *Key) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	cfg := &struct {
+		Address string
+		Port    int
+	}{}
+	err := unmarshal(&cfg)
+	if err != nil {
+		return err
 	}
-}
-
-func NewLBUpstream(addr string, port int) *LBUpstream {
-	return &LBUpstream{
-		Address: ip2int(net.ParseIP(addr)),
-		Port:    uint16be(uint16(port)),
-		Count:   0,
+	newKey := Key{
+		Address: htonIP(net.ParseIP(cfg.Address)),
+		Port:    htons(uint16(cfg.Port)),
 	}
+	*k = newKey
+	return nil
 }
 
-func uint16be(port uint16) uint16 {
-	bs := make([]byte, 2)
-	binary.LittleEndian.PutUint16(bs, port)
-	return binary.BigEndian.Uint16(bs)
+// IP returns the net.IP address of the key
+func (k *Key) IP() net.IP {
+	return ntohIP(k.Address[:])
 }
 
-func intle(i uint16) uint16 {
-	bs := make([]byte, 2)
-	binary.LittleEndian.PutUint16(bs, i)
-	return binary.LittleEndian.Uint16(bs)
+func (k *Key) String() string {
+	return fmt.Sprintf("Key{ Address: %s, Port: %d, Slave: %d } ", k.IP(), ntohs(k.Port[:]), k.Slave)
 }
 
-func ip2int(ip net.IP) uint32 {
-	if len(ip) == 16 {
-		return binary.LittleEndian.Uint32(ip[12:16])
+// UnmarshalYAML translates the yaml types to match the internal C types
+func (u *Upstream) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var tcAction uint8
+	cfg := &struct {
+		Address  string `yaml:"address"`
+		Port     uint16 `yaml:"port"`
+		TCAction string `yaml:"tc_action"`
+	}{}
+	err := unmarshal(&cfg)
+	if err != nil {
+		return err
 	}
-	return binary.LittleEndian.Uint32(ip)
+
+	if cfg.TCAction == "pass" || cfg.TCAction == "" {
+		tcAction = 0
+	} else if cfg.TCAction == "block" {
+		tcAction = 2
+	} else {
+		return fmt.Errorf("invalid tc_action value: %s", cfg.TCAction)
+	}
+	newUpstream := Upstream{
+		Address:  htonIP(net.ParseIP(cfg.Address)),
+		Port:     htons(cfg.Port),
+		Count:    0,
+		TCAction: tcAction,
+	}
+	*u = newUpstream
+	return nil
 }
 
-func int2ip(nn uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.BigEndian.PutUint32(ip, nn)
-	return ip
+// IP returns the net.IP address of the upstream
+func (u *Upstream) IP() net.IP {
+	return ntohIP(u.Address[:])
+}
+
+func (u *Upstream) String() string {
+	return fmt.Sprintf("Upstream{ Address: %s, Port: %d, Count: %d, Action: %d } ", u.IP(), ntohs(u.Port[:]), u.Count, u.TCAction)
 }

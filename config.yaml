@@ -4,7 +4,7 @@
   upstream:
     - address: 172.17.0.2
       port: 8125
-      tc_action: 2
+      tc_action: pass
     - address: 172.17.0.3
       port: 8125
-      tc_action: 2
+      tc_action: pass

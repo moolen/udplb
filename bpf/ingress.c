@@ -49,6 +49,7 @@ struct lb_upstream {
     __be32 target;
     __be16 port;
     __u8 count; // 0 is the master "service". the actual upstreams are stored in count=N (1-indexed)
+    __u8 tc_action;
 } __attribute__((packed));
 
 BPF_HASH(upstreams, struct lb_key, struct lb_upstream, LB_MAP_MAX_ENTRIES);
@@ -93,7 +94,9 @@ static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
     key.address = ip->daddr;
     key.port = udp->dest;
     key.slave = 0;
-
+#ifdef DEBUG
+    bpf_trace_printk("lookup master at %lu %lu\n", key.address, key.port);
+#endif
     master = upstreams.lookup(&key);
 
     if (master) {
@@ -118,10 +121,7 @@ static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
     return NULL;
 }
 
-//
-//
-//
-static inline int fwd_upstream(struct __sk_buff *skb, struct lb_upstream *upstream)
+static inline int fwd_packet(struct __sk_buff *skb, __be32 target_addr, __be16 target_port, bool do_fib_lookup)
 {
     int ret;
     void *data = (void *)(long)skb->data;
@@ -146,52 +146,100 @@ static inline int fwd_upstream(struct __sk_buff *skb, struct lb_upstream *upstre
     __u32 dst_ip = ip->daddr;
     __be16 dst_port = udp->dest;
 
-    bpf_trace_printk("src addr: %lu\n", ip->saddr);
-    bpf_trace_printk("target: %lu %lu\n", upstream->target, dst_port);
 
-    __builtin_memset(&fib_params, 0, sizeof(fib_params));
+    if (do_fib_lookup) {
+        __builtin_memset(&fib_params, 0, sizeof(fib_params));
 
-    fib_params.family       = AF_INET;
-    fib_params.tos          = ip->tos;
-    fib_params.l4_protocol  = ip->protocol;
-    fib_params.sport        = 0;
-    fib_params.dport        = 0;
-    fib_params.tot_len      = bpf_ntohs(ip->tot_len);
-    fib_params.ipv4_src     = src_ip;
-    fib_params.ipv4_dst     = upstream->target;
-    fib_params.ifindex      = skb->ingress_ifindex;
+        fib_params.family       = AF_INET;
+        fib_params.tos          = ip->tos;
+        fib_params.l4_protocol  = ip->protocol;
+        fib_params.sport        = 0;
+        fib_params.dport        = 0;
+        fib_params.tot_len      = bpf_ntohs(ip->tot_len);
+        fib_params.ipv4_src     = src_ip;
+        fib_params.ipv4_dst     = target_addr;
+        fib_params.ifindex      = skb->ingress_ifindex;
 
-    ret = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
+        ret = bpf_fib_lookup(skb, &fib_params, sizeof(fib_params), BPF_FIB_LOOKUP_DIRECT);
 
-    if (ret != BPF_FIB_LKUP_RET_SUCCESS) {
-#ifdef DEBUG
-        bpf_trace_printk("fib lookup result: %lu\n", ret);
-#endif
-        return -1;
+        if (ret != BPF_FIB_LKUP_RET_SUCCESS) {
+            #ifdef DEBUG
+            bpf_trace_printk("fib lookup result: %lu\n", ret);
+            bpf_trace_printk("fib lookup src_ip= %lu dst_ip= %lu\n", src_ip, target_addr);
+            #endif
+            return -1;
+        }
+
+        // set smac/dmac addr
+        bpf_skb_store_bytes(skb, 0, &fib_params.dmac, sizeof(fib_params.dmac), 0);
+        bpf_skb_store_bytes(skb, ETH_ALEN, &fib_params.smac, sizeof(fib_params.smac), 0);
     }
-
-    // set smac/dmac addr
-    bpf_skb_store_bytes(skb, 0, &fib_params.dmac, sizeof(fib_params.dmac), 0);
-    bpf_skb_store_bytes(skb, ETH_ALEN, &fib_params.smac, sizeof(fib_params.smac), 0);
+    #ifdef DEBUG
+    bpf_trace_printk("csum rewrite dst_ip= %lu target_addr= %lu\n", dst_ip, target_addr);
+    bpf_trace_printk("csum rewrite src_ip= %lu dst_ip= %lu\n", src_ip, dst_ip);
+    bpf_trace_printk("csum rewrite dst_port= %lu target_port= %lu\n", dst_port, target_port);
+    #endif
 
     // recalc checksum
-    bpf_l4_csum_replace(skb, L4_CSUM_OFF, dst_ip, upstream->target, sizeof(upstream->target));
+    bpf_l4_csum_replace(skb, L4_CSUM_OFF, dst_ip, target_addr, sizeof(target_addr));
     bpf_l4_csum_replace(skb, L4_CSUM_OFF, src_ip, dst_ip, sizeof(dst_ip));
-    bpf_l4_csum_replace(skb, L4_CSUM_OFF, dst_port, upstream->port, sizeof(upstream->port));
-	bpf_l3_csum_replace(skb, L3_CSUM_OFF, dst_ip, upstream->target, sizeof(upstream->target));
+    bpf_l4_csum_replace(skb, L4_CSUM_OFF, dst_port, target_port, sizeof(target_port));
+	bpf_l3_csum_replace(skb, L3_CSUM_OFF, dst_ip, target_addr, sizeof(target_addr));
 	bpf_l3_csum_replace(skb, L3_CSUM_OFF, src_ip, dst_ip, sizeof(dst_ip));
 
     // set src/dst addr
     bpf_skb_store_bytes(skb, IP_SRC_OFF, &dst_ip, sizeof(dst_ip), 0);
-    bpf_skb_store_bytes(skb, IP_DST_OFF, &upstream->target, sizeof(upstream->target), 0);
-    bpf_skb_store_bytes(skb, L4_PORT_OFF, &upstream->port, sizeof(upstream->port), 0);
+    bpf_skb_store_bytes(skb, IP_DST_OFF, &target_addr, sizeof(target_addr), 0);
+    bpf_skb_store_bytes(skb, L4_PORT_OFF, &target_port, sizeof(target_port), 0);
 
-    // clone packet, put it on interface found in fib
-    ret = bpf_clone_redirect(skb, fib_params.ifindex, 0);
+    if (do_fib_lookup){
+        // clone packet, put it on interface found in fib
+        ret = bpf_clone_redirect(skb, fib_params.ifindex, 0);
+#ifdef DEBUG
+        bpf_trace_printk("clone redirect: %lu\n", ret);
+#endif
+    }
+    return 0;
+}
+
+//
+//
+//
+static inline int fwd_upstream(struct __sk_buff *skb, struct lb_upstream *upstream)
+{
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+    struct ethhdr  *eth  = data;
+    struct iphdr   *ip   = (data + sizeof(struct ethhdr));
+    struct udphdr *udp = (data + sizeof(struct ethhdr) + sizeof(struct iphdr));
+    struct bpf_fib_lookup fib_params;
+
+    // return early if not enough data
+    if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) > data_end){
+        return -1;
+    }
+
+    // only IP packets are allowed
+    if (eth->h_proto != htons(ETH_P_IP)){
+        return -1;
+    }
+
+    // grab original destination addr
+    __u32 dest_ip = ip->daddr;
+    __u16 dest_port = udp->dest;
+
+    int ret = fwd_packet(skb, upstream->target, upstream->port, true);
 #ifdef DEBUG
     bpf_trace_printk("clone redirect: %lu\n", ret);
 #endif
-    return 0;
+    if (ret == -1) {
+        return -1;
+    }
+    if (upstream->tc_action == TC_ACT_OK){
+        // forward initial packet
+        fwd_packet(skb, dest_ip, dest_port, false);
+    }
+    return upstream->tc_action;
 }
 
 //
@@ -207,17 +255,7 @@ int ingress(struct __sk_buff *skb) {
 #ifdef DEBUG
         bpf_trace_printk("found upstream\n");
 #endif
-        int ret = fwd_upstream(skb, upstream);
-        if (ret == 0) {
-#ifdef DEBUG
-            bpf_trace_printk("fwd succeesful\n");
-#endif
-            return TC_ACT_OK;
-        }
-#ifdef DEBUG
-        bpf_trace_printk("fwd failed\n");
-#endif
-        return TC_ACT_OK;
+        return fwd_upstream(skb, upstream);
     }
     bpf_trace_printk("no upstream: %lu\n", upstream);
     return TC_ACT_OK;

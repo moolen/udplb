@@ -2,15 +2,11 @@ package main
 
 import (
 	"flag"
-	"io/ioutil"
 	"os"
 	"os/signal"
-	"path"
-	"path/filepath"
-
-	log "github.com/sirupsen/logrus"
 
 	bpf "github.com/iovisor/gobpf/bcc"
+	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 )
 
@@ -24,21 +20,19 @@ void perf_reader_free(void *ptr);
 import "C"
 
 var (
-	device string
-	debug  bool
+	device   string
+	debug    bool
+	confPath string
 )
 
 func main() {
 	flag.StringVar(&device, "i", "lo", "network interface")
 	flag.BoolVar(&debug, "d", false, "enable debug mode")
+	flag.StringVar(&confPath, "c", "", "path to the configuration file")
 	flag.Parse()
 
 	log.Infof("cli config: interface=%s, debug=%t", device, debug)
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err != nil {
-		log.Fatal(err)
-	}
-	cfgFile, err := os.Open(path.Join(dir, "config.yaml"))
+	cfgFile, err := os.Open(confPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,7 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	source, err := ioutil.ReadFile(path.Join(dir, "bpf", "ingress.c"))
+	source, err := Asset("bpf/ingress.c")
 	if err != nil {
 		log.Fatal(err)
 	}

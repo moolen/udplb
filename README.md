@@ -15,11 +15,11 @@ There are no implementations or examples available on how to use eBPF/BCC in the
 
 use-case: clone incoming traffic
 
-create a `config.yaml` like the following. It will do the following:
+create a `config.yaml` like the following. The configuration describes the following:
 
-* look for packets matching `1.2.3.4:1111` destination ip address / port
-* this packet will be cloned and sent to `10.100.53.27:2222`
-* `tc_action: pass` will let the packet go up the stack (i.e. userspace applications on THIS host will receive this packet)
+* look for packets matching `1.2.3.4:1111`
+* send them over to `10.100.53.27:2222`
+* let the packet go up the stack (`tc_action: pass`)
 
 ```yaml
 - key:
@@ -31,7 +31,7 @@ create a `config.yaml` like the following. It will do the following:
       tc_action: pass
 ```
 
-Run udplb, you'll need NET_ADMIN and SYS_ADMIN privileges:
+Run udplb, you'll need `NET_ADMIN` and `SYS_ADMIN` privileges:
 ```
 $ sudo ./udplb -d -i ens3
 INFO[0000] cli config: interface=ens3, debug=true
@@ -48,16 +48,17 @@ DEBU[0001] hw addr is up to date
 
 What happens here?
 * the `config.yaml` will be parsed
+* `ingress.c` will be compiled to BPF bytecode and sent to the kernel which validates it
 * `tc qdisc` will be created
 * `tc filter` will be created
-* the associated bpf map will be populated from the application
+* the associated bpf map will be populated from the `config.yml`
 * we'll continuously issue ARP requests and inform the kernel about changes for our upstreams
 
-When we mutate the packet in the tc layer, we can lookup records from the fib (forwarding information base, IP <-> MAC lookup) table but we can not issue arp requests from there (and block further processing of the packet). That's why we populate the fib table from userspace.
+When we mutate the packet in the tc layer, we can lookup records from the fib (forwarding information base, `IP <-> MAC` lookup) table but we can not issue arp requests from there (and block further processing of the packet). That's why we populate the fib table from userspace.
 
 ## Debugging
 
-run udplb with `-d` to enable debug mode. That will compile the eBPF program with debugging `bpf_trace_printk` calls. You can access the logs from the kernel trace_pipe.
+run udplb with `-d` to enable debug mode. That will compile the eBPF program with debugging `bpf_trace_printk` calls. You can access the logs via the kernel trace pipe.
 
 ```
 $ sudo tc exec bpf dbg

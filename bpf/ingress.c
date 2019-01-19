@@ -1,4 +1,4 @@
-#define KBUILD_MODNAME "foo"
+#define KBUILD_MODNAME "udplb"
 #include <uapi/linux/bpf.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>
@@ -10,10 +10,7 @@
 #define PROTO_UDP 17
 #define LB_MAP_MAX_ENTRIES 256
 
-// provided by us at compile-time
-//#define TC_PKG_ACTION;
-
-// # Example to find an upstream
+// # Example to find a upstream
 //
 // incoming packet:
 //
@@ -27,12 +24,16 @@
 //    8.8.8.8:8125
 //
 // lookup-mechanics:
-//   first: lookup: "master" service. We only care about the count!
-//   KEY: [2.2.2.2:8125/0]
-//   VAL: [0/0/2] <-- N is the count.
 //
-//   2nd: hash incoming packet w/ count
-//   slave_nr: (hash(skb) % count) + 1
+//  lb_key struct: <src-ip>/<dest-port>/<slave>
+//  lb_upstream struct: <dest-ip>/<dest-port>/<count>
+//
+//   first: lookup: "master". slave=0 is a master by definition.
+//   KEY: [2.2.2.2/8125/0]
+//   VAL: [0/0/2] <-- 2 is the count. this means we have 2 upstreams available.
+//
+//   second: hash incoming packet w/ slave count
+//   slave_nr = ( hash(packet) % count) + 1
 //
 //   3rd: lookup upstream
 //   let's assume slave_nr = 2
@@ -54,26 +55,24 @@ struct lb_upstream {
 
 BPF_HASH(upstreams, struct lb_key, struct lb_upstream, LB_MAP_MAX_ENTRIES);
 
+// L3/L4 offsets
 #define L3_CSUM_OFF (ETH_HLEN + offsetof(struct iphdr, check))
 #define IP_SRC_OFF (ETH_HLEN + offsetof(struct iphdr, saddr))
 #define IP_DST_OFF (ETH_HLEN + offsetof(struct iphdr, daddr))
 #define L4_PORT_OFF (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct udphdr, dest ))
 #define L4_CSUM_OFF (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct udphdr, check))
 
-#define SKIP_PACKET -1
-
-//
-//
-//
+// tries to find an upstream for the given packet
+// returns an upstream pointer or NULL
 static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
 {
     struct lb_key key = {};
-    struct lb_upstream *master; // "master" is used for only count lookup
+    struct lb_upstream *master;
     struct lb_upstream *slave;
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-    struct ethhdr  *eth  = data;
-    struct iphdr   *ip   = (data + sizeof(struct ethhdr));
+    struct ethhdr *eth = data;
+    struct iphdr *ip   = (data + sizeof(struct ethhdr));
     struct udphdr *udp = (data + sizeof(struct ethhdr) + sizeof(struct iphdr));
 
     // return early if not enough data
@@ -94,26 +93,26 @@ static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
     key.address = ip->daddr;
     key.port = udp->dest;
     key.slave = 0;
-#ifdef DEBUG
+    #ifdef DEBUG
     bpf_trace_printk("lookup master at %lu %lu\n", key.address, key.port);
-#endif
+    #endif
     master = upstreams.lookup(&key);
 
     if (master) {
-#ifdef DEBUG
+        #ifdef DEBUG
         bpf_trace_printk("found master at %lu %lu\n", key.address, key.port);
         bpf_trace_printk("master count: %lu\n", master->count);
-#endif
+        #endif
         uint32_t hash = bpf_get_hash_recalc(skb);
         __u16 slave_idx = (hash % master->count) + 1;
         key.slave = slave_idx;
         slave = upstreams.lookup(&key);
         if (slave == 0){
-#ifdef DEBUG
+            #ifdef DEBUG
             bpf_trace_printk("slave lookup failed\n");
             bpf_trace_printk("slave key: addr= %lu %lu port= %lu\n", key.address, key.port);
             bpf_trace_printk("slave count: %lu\n", key.slave);
-#endif
+            #endif
             return NULL;
         }
         return slave;
@@ -121,7 +120,10 @@ static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
     return NULL;
 }
 
-static inline int fwd_packet(struct __sk_buff *skb, __be32 target_addr, __be16 target_port, bool do_fib_lookup)
+// mutates the given packet buffer: set L2-L4 fields, recalculate checksums
+// if fwd_packet is true, we'll clone and forward the packet
+// returns 0 on success, negative on failure
+static inline int mutate_packet(struct __sk_buff *skb, __be32 target_addr, __be16 target_port, bool fwd_packet)
 {
     int ret;
     void *data = (void *)(long)skb->data;
@@ -146,10 +148,8 @@ static inline int fwd_packet(struct __sk_buff *skb, __be32 target_addr, __be16 t
     __u32 dst_ip = ip->daddr;
     __be16 dst_port = udp->dest;
 
-
-    if (do_fib_lookup) {
+    if (fwd_packet) {
         __builtin_memset(&fib_params, 0, sizeof(fib_params));
-
         fib_params.family       = AF_INET;
         fib_params.tos          = ip->tos;
         fib_params.l4_protocol  = ip->protocol;
@@ -192,19 +192,15 @@ static inline int fwd_packet(struct __sk_buff *skb, __be32 target_addr, __be16 t
     bpf_skb_store_bytes(skb, IP_DST_OFF, &target_addr, sizeof(target_addr), 0);
     bpf_skb_store_bytes(skb, L4_PORT_OFF, &target_port, sizeof(target_port), 0);
 
-    if (do_fib_lookup){
+    if (fwd_packet){
         // clone packet, put it on interface found in fib
-        ret = bpf_clone_redirect(skb, fib_params.ifindex, 0);
-#ifdef DEBUG
-        bpf_trace_printk("clone redirect: %lu\n", ret);
-#endif
+        return bpf_clone_redirect(skb, fib_params.ifindex, 0);
     }
     return 0;
 }
 
-//
-//
-//
+// forwards a packet to the given upstream
+// returns an TC_ACT_*
 static inline int fwd_upstream(struct __sk_buff *skb, struct lb_upstream *upstream)
 {
     void *data = (void *)(long)skb->data;
@@ -228,23 +224,36 @@ static inline int fwd_upstream(struct __sk_buff *skb, struct lb_upstream *upstre
     __u32 dest_ip = ip->daddr;
     __u16 dest_port = udp->dest;
 
-    int ret = fwd_packet(skb, upstream->target, upstream->port, true);
-#ifdef DEBUG
-    bpf_trace_printk("clone redirect: %lu\n", ret);
-#endif
-    if (ret == -1) {
+    // change packet destination, and forward it
+    int ret = mutate_packet(skb, upstream->target, upstream->port, true);
+    if (ret < 0) {
+        #ifdef DEBUG
+        bpf_trace_printk("fwd packet error: %lu\n", ret);
+        #endif
         return -1;
     }
+
+    // if we want to pass the packet to userspace
+    // we got to re-set the daddr and port but we do not need to forward it to a interface
+    // we just return TC_ACT_OK and hand it over to the kernel
     if (upstream->tc_action == TC_ACT_OK){
-        // forward initial packet
-        fwd_packet(skb, dest_ip, dest_port, false);
+        #ifdef DEBUG
+        bpf_trace_printk("preparing packet for userspace\n");
+        #endif
+        ret = mutate_packet(skb, dest_ip, dest_port, false);
+        #ifdef DEBUG
+        if (ret < 0){
+            bpf_trace_printk("userspace fwd packet error: %lu\n", ret);
+            return -1;
+        }
+        bpf_trace_printk("packet successfully prepared for userspace\n");
+        #endif
     }
     return upstream->tc_action;
 }
 
-//
-//
-//
+// main entrypoint
+// returns TC_ACT_*
 int ingress(struct __sk_buff *skb) {
     struct lb_upstream *upstream;
     upstream = lookup_upstream(skb);
@@ -252,9 +261,9 @@ int ingress(struct __sk_buff *skb) {
         return TC_ACT_OK;
     }
     if (upstream){
-#ifdef DEBUG
-        bpf_trace_printk("found upstream\n");
-#endif
+        #ifdef DEBUG
+        bpf_trace_printk("found upstream, forwarding packet\n");
+        #endif
         return fwd_upstream(skb, upstream);
     }
     bpf_trace_printk("no upstream: %lu\n", upstream);

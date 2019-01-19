@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	bpf "github.com/iovisor/gobpf/bcc"
+	"github.com/moolen/udplb/byteorder"
 	log "github.com/sirupsen/logrus"
 
 	"gopkg.in/yaml.v2"
@@ -16,16 +17,27 @@ import (
 
 // Key must match C struct lb_key
 type Key struct {
+	// Address contains the IPv4 address in network byte order
 	Address [4]byte
-	Port    [2]byte
-	Slave   uint8
+	// Port contains the UDP Port in network byte order
+	Port [2]byte
+	// Slave field contains the number of the upstream. 0 is considered a master
+	// see bpf/ingress.c for a detailed explanation of the lookup procedure
+	Slave uint8
 }
 
 // Upstream must match C struct lb_upstream
 type Upstream struct {
-	Address  [4]byte
-	Port     [2]byte
-	Count    uint8
+	// Address contains the IPv4 address in network byte order
+	Address [4]byte
+	// Port contains the UDP port of the upstream in network byte order
+	Port [2]byte
+	// Count is set only for the master (Key.Slave=0) and contains the number of upstreams
+	Count uint8
+	// TCAction contains a valid TC_ACT_* return code for eBPF programs
+	// TCAction=0 will forward the packet to userspace
+	// TCAction=2 will drop the packet
+	// see linux/pkt_cls.h
 	TCAction uint8
 }
 
@@ -40,6 +52,7 @@ func newConfigYaml(r io.Reader) (cfg *config, err error) {
 	return
 }
 
+// Apply sets the key/upstream configuration in the provided bpf.Table
 func (c config) Apply(tbl *bpf.Table) error {
 	for _, record := range c {
 		k := record.Key
@@ -84,8 +97,8 @@ func (k *Key) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return err
 	}
 	newKey := Key{
-		Address: htonIP(net.ParseIP(cfg.Address)),
-		Port:    htons(uint16(cfg.Port)),
+		Address: byteorder.HtonIP(net.ParseIP(cfg.Address)),
+		Port:    byteorder.Htons(uint16(cfg.Port)),
 	}
 	*k = newKey
 	return nil
@@ -93,11 +106,12 @@ func (k *Key) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // IP returns the net.IP address of the key
 func (k *Key) IP() net.IP {
-	return ntohIP(k.Address[:])
+	return byteorder.NtohIP(k.Address[:])
 }
 
+// implement Stringer interface
 func (k *Key) String() string {
-	return fmt.Sprintf("Key{ Address: %s, Port: %d, Slave: %d } ", k.IP(), ntohs(k.Port[:]), k.Slave)
+	return fmt.Sprintf("Key{ Address: %s, Port: %d, Slave: %d } ", k.IP(), byteorder.Ntohs(k.Port[:]), k.Slave)
 }
 
 // UnmarshalYAML translates the yaml types to match the internal C types
@@ -121,8 +135,8 @@ func (u *Upstream) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return fmt.Errorf("invalid tc_action value: %s", cfg.TCAction)
 	}
 	newUpstream := Upstream{
-		Address:  htonIP(net.ParseIP(cfg.Address)),
-		Port:     htons(cfg.Port),
+		Address:  byteorder.HtonIP(net.ParseIP(cfg.Address)),
+		Port:     byteorder.Htons(cfg.Port),
 		Count:    0,
 		TCAction: tcAction,
 	}
@@ -132,9 +146,10 @@ func (u *Upstream) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // IP returns the net.IP address of the upstream
 func (u *Upstream) IP() net.IP {
-	return ntohIP(u.Address[:])
+	return byteorder.NtohIP(u.Address[:])
 }
 
+// implement Stringer interface
 func (u *Upstream) String() string {
-	return fmt.Sprintf("Upstream{ Address: %s, Port: %d, Count: %d, Action: %d } ", u.IP(), ntohs(u.Port[:]), u.Count, u.TCAction)
+	return fmt.Sprintf("Upstream{ Address: %s, Port: %d, Count: %d, Action: %d } ", u.IP(), byteorder.Ntohs(u.Port[:]), u.Count, u.TCAction)
 }

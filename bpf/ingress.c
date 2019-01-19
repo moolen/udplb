@@ -33,7 +33,7 @@
 //   VAL: [0/0/2] <-- 2 is the count. this means we have 2 upstreams available.
 //
 //   second: hash incoming packet w/ slave count
-//   slave_nr = ( hash(packet) % count) + 1
+//   slave_nr = ( udp->source % count) + 1
 //
 //   3rd: lookup upstream
 //   let's assume slave_nr = 2
@@ -103,8 +103,9 @@ static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
         bpf_trace_printk("found master at %lu %lu\n", key.address, key.port);
         bpf_trace_printk("master count: %lu\n", master->count);
         #endif
-        uint32_t hash = bpf_get_hash_recalc(skb);
-        __u16 slave_idx = (hash % master->count) + 1;
+        // we do not need a 4-tuple hash, since udp is not connection-oriented
+        // for now, we'll just use the soure-port
+        __u16 slave_idx = (udp->source % master->count) + 1;
         key.slave = slave_idx;
         slave = upstreams.lookup(&key);
         if (slave == 0){

@@ -1,10 +1,10 @@
 - key:
-    address: 127.0.0.1
+    address: 10.123.0.10
     port: 8125
   upstream:
-    - address: 172.17.0.2
+    - address: target_one
       port: 8125
       tc_action: pass
-    - address: 172.17.0.3
+    - address: target_two
       port: 8125
       tc_action: pass

@@ -1,0 +1,41 @@
+version: "2"
+
+services:
+  udplb:
+    build: .
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    privileged: true
+    volumes:
+    - "/lib/modules:/lib/modules:ro"
+    - "/usr/src:/usr/src:ro"
+    - "/etc/localtime:/etc/localtime:ro"
+    - "./config.yaml:/config.yaml"
+    restart: always
+    command: "-d -c /config.yaml -i eth0"
+    networks:
+      vpcbr:
+        ipv4_address: 10.123.0.10
+
+  target_one:
+    image: corfr/tcpdump
+    command: -XX -eni eth0 udp port 8125
+    networks:
+      vpcbr:
+        ipv4_address: 10.123.0.20
+
+  target_two:
+    image: corfr/tcpdump
+    command: -XX -eni eth0 udp port 8125
+    networks:
+      vpcbr:
+        ipv4_address: 10.123.0.30
+
+networks:
+  vpcbr:
+    driver: bridge
+    ipam:
+     config:
+       - subnet: 10.123.0.0/24
+         gateway: 10.123.0.1

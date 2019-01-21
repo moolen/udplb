@@ -4,7 +4,16 @@ udplb is a udp load balancer / packer forwarder using eBPF/BCC in the traffic co
 
 ## Motivation
 
-There are no implementations or examples available on how to use eBPF/BCC in the traffic control layer with [goBPF](https://github.com/iovisor/gobpf/). Also, i want to provide a starting point to do networking with BCC/goBPF. Use this if you want to either load-balance incoming UDP traffic to different upstreams or (the one i was after) to A) clone incoming UDP traffic + send it to a different host AND let the UDP packet go up the stack. Use this at own risk this is not production-ready, but should be close to.
+There are no implementations or examples available on how to use eBPF/BCC in the traffic control layer with [goBPF](https://github.com/iovisor/gobpf/). Also, i want to provide a starting point to do networking with BCC/goBPF.
+
+Use this at own risk this is not production-ready, but should be close to.
+
+## Use-case: UDP Relay
+You can use this as a low-level, transparent UDP relay: Incoming UDP packets (matched by destination addr/port) are cloned and sent directly to a different host. The initial packet **goes up the stack** and may be processed from userspace.
+
+## Use-case: UDP Forwarder
+You may use this as a UDP packet forwarder: Incoming packets (matching a destination address/port) are being forwarded to a different destination host. the packet will **NOT** be further processed by the kernel.
+
 
 ## Prerequisites
 
@@ -19,7 +28,7 @@ create a `config.yaml` like the following. The configuration describes the follo
 
 * look for packets matching `1.2.3.4:1111`
 * send them over to `10.100.53.27:2222`
-* let the packet go up the stack (`tc_action: pass`)
+* let the packet go up the stack (`tc_action: pass`, use `block` to drop the packet)
 
 ```yaml
 - key:

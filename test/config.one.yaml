@@ -3,9 +3,9 @@
     port: 8125
   options:
     tc_action: pass
-    strategy: src-ip
+    strategy: src-port
   upstream:
-    - address: target_one
+    - address: tester_one
       port: 8125
-    - address: target_two
+    - address: tester_two
       port: 8125

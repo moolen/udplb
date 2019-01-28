@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +8,6 @@ import (
 
 	bpf "github.com/iovisor/gobpf/bcc"
 	"github.com/moolen/udplb/byteorder"
-	log "github.com/sirupsen/logrus"
 
 	"gopkg.in/yaml.v2"
 )
@@ -39,10 +36,22 @@ type Upstream struct {
 	// TCAction=2 will drop the packet
 	// see linux/pkt_cls.h
 	TCAction uint8
+	// 0=src-port based
+	// 1=src-ip based
+	// 2=udp-payload based (TODO)
+	Strategy uint8
+}
+
+// LBOption is a configuration-only data structure
+// it is merged into the Upstream value
+type LBOption struct {
+	TCAction uint8
+	Strategy uint8
 }
 
 type config []struct {
 	Key      Key
+	Options  LBOption
 	Upstream []Upstream
 }
 
@@ -56,32 +65,24 @@ func newConfigYaml(r io.Reader) (cfg *config, err error) {
 func (c config) Apply(tbl *bpf.Table) error {
 	for _, record := range c {
 		k := record.Key
-		k.Slave = 0 // the master
-		masterUpstream := Upstream{Count: uint8(len(record.Upstream))}
+		// only the master contains the Strategy & TCAction
+		k.Slave = 0
+		masterUpstream := Upstream{
+			Count:    uint8(len(record.Upstream)),
+			Strategy: record.Options.Strategy,
+			TCAction: record.Options.TCAction,
+		}
 		err := tbl.SetP(unsafe.Pointer(&k), unsafe.Pointer(&masterUpstream))
 		if err != nil {
-			return err
+			return fmt.Errorf("err SetP master: %s", err)
 		}
 		for n, upstream := range record.Upstream {
 			k.Slave = uint8(n + 1)
 			err := tbl.SetP(unsafe.Pointer(&k), unsafe.Pointer(&upstream))
 			if err != nil {
-				return err
+				return fmt.Errorf("err SetP upstream: %s", err)
 			}
 		}
-	}
-	for it := tbl.Iter(); it.Next(); {
-		var upstream Upstream
-		var key Key
-		err := binary.Read(bytes.NewBuffer(it.Key()), binary.LittleEndian, &key)
-		if err != nil {
-			return err
-		}
-		err = binary.Read(bytes.NewBuffer(it.Leaf()), binary.LittleEndian, &upstream)
-		if err != nil {
-			return err
-		}
-		log.Infof("%s | %s", key.String(), upstream.String())
 	}
 	return nil
 }
@@ -116,17 +117,39 @@ func (k *Key) String() string {
 
 // UnmarshalYAML translates the yaml types to match the internal C types
 func (u *Upstream) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var tcAction uint8
 	cfg := &struct {
-		Address  string `yaml:"address"`
-		Port     uint16 `yaml:"port"`
-		TCAction string `yaml:"tc_action"`
+		Address string `yaml:"address"`
+		Port    uint16 `yaml:"port"`
 	}{}
 	err := unmarshal(&cfg)
 	if err != nil {
 		return err
 	}
 
+	addr, err := net.ResolveIPAddr("ip", cfg.Address)
+	if err != nil {
+		return fmt.Errorf("could not resolve addr %s: %s", cfg.Address, err)
+	}
+	newUpstream := Upstream{
+		Address: byteorder.HtonIP(addr.IP),
+		Port:    byteorder.Htons(cfg.Port),
+		Count:   0,
+	}
+	*u = newUpstream
+	return nil
+}
+
+// UnmarshalYAML translates the yaml types to internal C types
+func (o *LBOption) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var tcAction, strategy uint8
+	cfg := &struct {
+		TCAction string `yaml:"tc_action"`
+		Strategy string `yaml:"strategy"`
+	}{}
+	err := unmarshal(&cfg)
+	if err != nil {
+		return err
+	}
 	if cfg.TCAction == "pass" || cfg.TCAction == "" {
 		tcAction = 0
 	} else if cfg.TCAction == "block" {
@@ -134,17 +157,20 @@ func (u *Upstream) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	} else {
 		return fmt.Errorf("invalid tc_action value: %s", cfg.TCAction)
 	}
-	addr, err := net.ResolveIPAddr("ip", cfg.Address)
-	if err != nil {
-		return fmt.Errorf("could not resolve addr %s: %s", cfg.Address, err)
+	if cfg.Strategy == "src-port" || cfg.Strategy == "" {
+		strategy = 0
+	} else if cfg.Strategy == "src-ip" {
+		strategy = 1
+	} else if cfg.Strategy == "udp:" {
+
+	} else {
+		return fmt.Errorf("invalid strategy value: %s", cfg.Strategy)
 	}
-	newUpstream := Upstream{
-		Address:  byteorder.HtonIP(addr.IP),
-		Port:     byteorder.Htons(cfg.Port),
-		Count:    0,
+	opt := LBOption{
 		TCAction: tcAction,
+		Strategy: strategy,
 	}
-	*u = newUpstream
+	*o = opt
 	return nil
 }
 

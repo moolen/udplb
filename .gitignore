@@ -2,3 +2,5 @@
 udplb
 bindata.go
 vendor/
+test/rcv
+test/snd

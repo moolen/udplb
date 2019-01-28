@@ -10,13 +10,14 @@ const testConfigYaml = `
 - key:
     address: 127.0.0.1
     port: 8125
+  options:
+    tc_action: block
+    strategy: src-ip
   upstream:
     - address: 172.17.0.2
       port: 8125
-      tc_action: pass
     - address: 172.17.0.3
       port: 8125
-      tc_action: block
 `
 
 func TestConfig(t *testing.T) {
@@ -59,11 +60,11 @@ func TestConfig(t *testing.T) {
 		if bytes.Compare(us2.Port[:], []byte{0x1f, 0xbd}) != 0 {
 			t.Fatalf("us2.Port does not match. found: %#v", us2.Port)
 		}
-		if us1.TCAction != 0x0 {
-			t.Fatalf("us1.TCAction is wrong. found: %#v", us1)
+		if entry.Options.TCAction != 0x2 {
+			t.Fatalf("options.TCAction is wrong. found: %#v", entry.Options)
 		}
-		if us2.TCAction != 0x2 {
-			t.Fatalf("us2.TCAction is wrong. found: %#v", us2)
+		if entry.Options.Strategy != 0x1 {
+			t.Fatalf("options.TCAction is wrong. found: %#v", entry.Options)
 		}
 	}
 

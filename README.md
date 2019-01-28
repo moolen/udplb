@@ -34,10 +34,12 @@ create a `config.yaml` like the following. The configuration describes the follo
 - key:
     address: 1.2.3.4
     port: 1111
+  options:
+    tc_action: pass # `pass` or `block`
+    strategy: src-ip # `src-ip` or `src-port`
   upstream:
     - address: 10.100.53.27
       port: 2222
-      tc_action: pass
 ```
 
 Run udplb, you'll need `NET_ADMIN` and `SYS_ADMIN` privileges:

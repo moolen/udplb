@@ -51,6 +51,7 @@ struct lb_upstream {
     __be16 port;
     __u8 count; // 0 is the master "service". the actual upstreams are stored in count=N (1-indexed)
     __u8 tc_action;
+    __u8 strategy
 } __attribute__((packed));
 
 BPF_HASH(upstreams, struct lb_key, struct lb_upstream, LB_MAP_MAX_ENTRIES);
@@ -102,10 +103,21 @@ static inline struct lb_upstream *lookup_upstream(struct __sk_buff *skb)
         #ifdef DEBUG
         bpf_trace_printk("found master at %lu %lu\n", key.address, key.port);
         bpf_trace_printk("master count: %lu\n", master->count);
+        bpf_trace_printk("strat: %lu\n", master->strategy);
         #endif
-        // we do not need a 4-tuple hash, since udp is not connection-oriented
-        // for now, we'll just use the soure-port
-        __u16 slave_idx = (udp->source % master->count) + 1;
+        __u16 slave_idx;
+        if (master->strategy == 0){
+            #ifdef DEBUG
+            bpf_trace_printk("strat: udp-port: %lu\n", udp->source);
+            #endif
+            slave_idx = (udp->source % master->count) + 1;
+        } else {
+            #ifdef DEBUG
+            bpf_trace_printk("strat: ip-saddr: %lu\n", bpf_ntohl(ip->saddr));
+            #endif
+            slave_idx = (bpf_ntohl(ip->saddr) % master->count) + 1;
+        }
+
         key.slave = slave_idx;
         slave = upstreams.lookup(&key);
         if (slave == 0){

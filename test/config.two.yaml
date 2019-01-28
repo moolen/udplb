@@ -1,11 +1,11 @@
 - key:
-    address: 10.123.0.10
+    address: 10.123.100.10
     port: 8125
   options:
     tc_action: pass
     strategy: src-ip
   upstream:
-    - address: target_one
+    - address: tester_three
       port: 8125
-    - address: target_two
+    - address: tester_four
       port: 8125

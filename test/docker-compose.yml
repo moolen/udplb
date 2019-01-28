@@ -1,0 +1,81 @@
+version: "2"
+
+services:
+  udplb:
+    build: ../
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    privileged: true
+    volumes:
+    - "/lib/modules:/lib/modules:ro"
+    - "/usr/src:/usr/src:ro"
+    - "/etc/localtime:/etc/localtime:ro"
+    - "./config.one.yaml:/config.yaml"
+    restart: always
+    command: "-d -c /config.yaml -i eth0"
+    networks:
+      vpcbr:
+        ipv4_address: 10.123.0.10
+  udplb2:
+    build: ../
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    privileged: true
+    volumes:
+    - "/lib/modules:/lib/modules:ro"
+    - "/usr/src:/usr/src:ro"
+    - "/etc/localtime:/etc/localtime:ro"
+    - "./config.two.yaml:/config.yaml"
+    restart: always
+    command: "-d -c /config.yaml -i eth0"
+    networks:
+      vpcbr2:
+        ipv4_address: 10.123.100.10
+
+  tester_one:
+    build: .
+    entrypoint: /bin/sleep
+    command: "3600"
+    networks:
+      vpcbr:
+        ipv4_address: 10.123.0.20
+
+  tester_two:
+    build: .
+    entrypoint: /bin/sleep
+    command: "3600"
+    networks:
+      vpcbr:
+        ipv4_address: 10.123.0.30
+
+  tester_three:
+    build: .
+    entrypoint: /bin/sleep
+    command: "3600"
+    networks:
+      vpcbr2:
+        ipv4_address: 10.123.100.20
+
+  tester_four:
+    build: .
+    entrypoint: /bin/sleep
+    command: "3600"
+    networks:
+      vpcbr2:
+        ipv4_address: 10.123.100.21
+
+networks:
+  vpcbr:
+    driver: bridge
+    ipam:
+     config:
+       - subnet: 10.123.0.0/24
+         gateway: 10.123.0.1
+  vpcbr2:
+    driver: bridge
+    ipam:
+     config:
+       - subnet: 10.123.100.0/24
+         gateway: 10.123.100.1

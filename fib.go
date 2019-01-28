@@ -24,7 +24,7 @@ func updateFIB(cfg config, link netlink.Link) {
 					updateNeigh(u, link, neighList)
 				}
 			}
-			<-time.After(10 * time.Second)
+			<-time.After(2 * time.Second)
 		}
 	}
 }

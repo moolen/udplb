@@ -6,8 +6,6 @@ udplb is a udp load balancer / packer forwarder using eBPF/BCC in the traffic co
 
 There are no implementations or examples available on how to use eBPF/BCC in the traffic control layer with [goBPF](https://github.com/iovisor/gobpf/). Also, i want to provide a starting point to do networking with BCC/goBPF.
 
-Use this at own risk this is not production-ready, but should be close to.
-
 ## Use-case: UDP Relay
 You can use this as a low-level, transparent UDP relay: Incoming UDP packets (matched by destination addr/port) are cloned and sent directly to a different host. The initial packet **goes up the stack** and may be processed from userspace.
 
